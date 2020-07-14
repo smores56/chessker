@@ -1,0 +1,9 @@
+[submodule "mecha"]
+	path = mecha
+	url = https://github.com/Hejsil/mecha
+[submodule "zig-clap"]
+	path = zig-clap
+	url = https://github.com/Hejsil/zig-clap
+[submodule "adma"]
+	path = adma
+	url = https://github.com/suirad/adma
