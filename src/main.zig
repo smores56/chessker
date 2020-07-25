@@ -40,7 +40,7 @@ const InternalError = error{ UnableToFindKing, MissingPiece };
 
 const ParseError = error{ NonSequentialMoves, MissingMoveForBlack, InvalidDataProvided };
 
-const IllegalMoveError = error{ CastleBlocked, NoLongerAbleToCastle };
+const IllegalMoveError = error{ CastleBlocked, NoLongerAbleToCastle, AlreadyCastled };
 
 const CastleSide = enum(u1) {
     KingSide,
@@ -68,10 +68,29 @@ const Square = struct {
         };
     }
 
-    pub fn in_direction(square: Square, direction: AttackDirection, distance: u3) ?Square {
-        // TODO
+    pub fn in_direction(square: Square, vector: AttackVector) ?Square {
+        const components = vector.components();
+
+        const file = fallibleAdd(isize, square.file, components.up);
+        const rank = fallibleAdd(isize, square.rank, components.right);
+
+        if (file != null and rank != null) {
+            return Square{ .file = file.?, .rank = rank.? };
+        } else {
+            return null;
+        }
     }
 
+    pub fn add_vector(square: Square, vector: MoveVector) ?Square {
+        const file = fallibleAdd(isize, square.file, vector.file);
+        const rank = fallibleAdd(isize, square.rank, vector.rank);
+
+        if (file != null and rank != null) {
+            return Square{ .file = file.?, .rank = rank.? };
+        } else {
+            return null;
+        }
+    }
     pub fn fileParser() mecha.Parser(u3) {
         const file_converter = struct {
             fn converter(file: u8) ?u3 {
@@ -112,75 +131,6 @@ const Square = struct {
             fileParser(), rankParser(),
         }));
     }
-
-    pub fn iterator(start: Square, type_: Iterator.Type) Iterator {
-        return Iterator.init(start, type_);
-    }
-
-    pub const Iterator = struct {
-        type_: Type,
-        current: ?Square,
-
-        pub const Type = enum(u2) {
-            Rank,
-            File,
-            LeftDiagonal,
-            RightDiagonal,
-        };
-
-        pub fn init(start: Square, type_: Type) Iterator {
-            const current = switch (type_) {
-                .Rank => Square.init(0, start.rank),
-                .File => Square.init(start.file, 0),
-                .LeftDiagonal => if (start.file > 7 - start.rank)
-                    Square.init(0, start.file + start.rank)
-                else
-                    Square.init(start.file - (7 - start.rank), 7),
-                .RightDiagonal => if (start.file > start.rank)
-                    Square.init(start.file - start.rank, 0)
-                else
-                    Square.init(0, start.rank - start.file),
-            };
-
-            return Iterator{
-                .type_ = type_,
-                .current = current,
-            };
-        }
-
-        pub fn next(it: *Iterator) ?Square {
-            const current = it.current orelse return null;
-
-            switch (it.type_) {
-                .Rank => {
-                    it.current = if (current.file == 7)
-                        null
-                    else
-                        Square{ .file = current.file + 1, .rank = current.rank };
-                },
-                .File => {
-                    it.current = if (current.rank == 7)
-                        null
-                    else
-                        Square{ .file = current.file, .rank = current.rank + 1 };
-                },
-                .LeftDiagonal => {
-                    it.current = if (current.rank == 0 or current.file == 7)
-                        null
-                    else
-                        Square{ .file = current.file + 1, .rank = current.rank - 1 };
-                },
-                .RightDiagonal => {
-                    it.current = if (current.rank == 7 or current.file == 7)
-                        null
-                    else
-                        Square{ .file = current.file + 1, .rank = current.rank + 1 };
-                },
-            }
-
-            return current;
-        }
-    };
 };
 
 const PieceType = enum(u3) {
@@ -249,11 +199,6 @@ const AttackDirection = enum(u3) {
     Left,
     UpLeft,
 
-    const init_for_king = Up;
-    const init_for_queen = Up;
-    const init_for_rook = Up;
-    const init_for_bishop = UpRight;
-
     fn next_for_piece_type(direction: AttackDirection, piece_type: PieceType) ?AttackDirection {
         return switch (piece_type) {
             Queen, King => switch (direction) {
@@ -281,6 +226,72 @@ const AttackDirection = enum(u3) {
             else => null,
         };
     }
+};
+
+const AttackVector = struct {
+    direction: AttackDirection,
+    distance: u3,
+
+    pub fn init(comptime type_: PieceType) AttackVector {
+        return AttackVector{
+            .distance = 1,
+            .direction = switch (type_) {
+                Queen, Rook, King => AttackDirection.Up,
+                Bishop => UpRight,
+                else => @compileError("AttackVector is not usable for pawns or knights"),
+            },
+        };
+    }
+
+    pub fn components(vector: AttackVector) var {
+        var up: isize;
+        var right: isize;
+
+        switch (vector.direction) {
+            Up => {
+                up = 1;
+                right = 0;
+            },
+            UpRight => {
+                up = 1;
+                right = 1;
+            },
+            Right => {
+                up = 0;
+                right = 1;
+            },
+            DownRight => {
+                up = -1;
+                right = 1;
+            },
+            Down => {
+                up = -1;
+                right = 0;
+            },
+            DownLeft => {
+                up = -1;
+                right = -1;
+            },
+            Left => {
+                up = 0;
+                right = -1;
+            },
+            UpLeft => {
+                up = 1;
+                right = -1;
+            },
+        }
+
+        return .{
+            .up = @as(isize, vector.distance) * up,
+            .right = @as(isize, vector.distance) * right,
+        };
+    }
+};
+
+const MoveVector = struct {
+    file: isize,
+    rank: isize,
 };
 
 const Piece = struct {
@@ -316,87 +327,122 @@ const Piece = struct {
         }
     }
 
-    pub fn possible_moves(piece: *Piece, square: Square, pieces: *[8][8]?Piece) MoveIterator {
+    pub fn possible_moves(piece: *Piece, square: Square, board: *Board) MoveIterator {
         return MoveIterator.init(piece, square, pieces);
     }
 
     const MoveIterator = struct {
         piece: *Piece,
         square: Square,
-        pieces: *[8][8]?Piece,
+        board: *Board,
         type_: ?MoveContext,
 
+        const NextMove = struct {
+            move: ?Move = null,
+            out_of_moves: bool = false,
+        };
+
+        const PawnMove = enum {
+            OneForward,
+            TwoForward,
+            LeftAttack,
+            RightAttack,
+
+            pub fn initial() PawnMove {
+                return PawnMove.OneForward;
+            }
+
+            pub fn next(move: PawnMove) ?PawnMove {
+                return switch (move) {
+                    OneForward => TwoForward,
+                    TwoForward => LeftAttack,
+                    LeftAttack => RightAttack,
+                    RightAttack => null,
+                };
+            }
+
+            pub fn vector(move: PawnMove, color: Color) MoveVector {
+                if (color == Color.White) {
+                    return switch (move) {
+                        OneForward => MoveVector{
+                            .file = 1,
+                            .rank = 0,
+                        },
+                        TwoForward => MoveVector{
+                            .file = 2,
+                            .rank = 0,
+                        },
+                        LeftAttack => MoveVector{
+                            .file = 1,
+                            .rank = -1,
+                        },
+                        RightAttack => MoveVector{
+                            .file = 1,
+                            .rank = 1,
+                        },
+                    };
+                } else {
+                    return switch (move) {
+                        OneForward => MoveVector{
+                            .file = -1,
+                            .rank = 0,
+                        },
+                        TwoForward => MoveVector{
+                            .file = -2,
+                            .rank = 0,
+                        },
+                        LeftAttack => MoveVector{
+                            .file = -1,
+                            .rank = 1,
+                        },
+                        RightAttack => MoveVector{
+                            .file = -1,
+                            .rank = -1,
+                        },
+                    };
+                }
+            }
+        };
+
         const MoveContext = union(PieceType) {
-            Queen = struct {
-                direction: AttackDirection,
-                distance: u3,
-            },
-            Rook = struct {
-                direction: AttackDirection,
-                distance: u3,
-            },
-            Bishop = struct {
-                direction: AttackDirection,
-                distance: u3,
-            },
-            King = struct {
-                direction: AttackDirection,
-            },
+            Pawn = PawnMove,
+            Queen = AttackVector,
+            Rook = AttackVector,
+            Bishop = AttackVector,
+            King = AttackDirection,
             Knight = struct {
-                move: u3,
-            },
-            Pawn = struct {
-                two_square_move: bool,
-                left_attack: bool,
-                right_attack: bool,
+                move_index: u3,
             },
 
             fn init(type_: PieceType) MoveContext {
                 return switch (type_) {
+                    Pawn => .{
+                        .Pawn = PawnMove.initial(),
+                    },
                     Queen => .{
-                        .Queen = .{
-                            .direction = AttackDirection.init_for_queen,
-                            .distance = 0,
-                        },
+                        .Queen = AttackVector.init(PieceType.Queen),
                     },
                     Rook => .{
-                        .Rook = .{
-                            .direction = AttackDirection.init_for_rook,
-                            .distance = 0,
-                        },
+                        .Rook = AttackVector.init(PieceType.Rook),
                     },
                     Bishop => .{
-                        .Bishop = .{
-                            .direction = AttackDirection.init_for_bishop,
-                            .distance = 0,
-                        },
+                        .Bishop = AttackVector.init(PieceType.Bishop),
                     },
                     King => .{
-                        .King = .{
-                            .direction = AttackDirection.init_for_king,
-                        },
+                        .King = AttackDirection.Up,
                     },
                     Knight => .{
-                        .Knight = .{
-                            .move = 0,
-                        },
-                    },
-                    Pawn => .{
-                        .Pawn = .{
-                            .two_square_move = false,
-                            .left_attack = false,
-                            .right_attack = false,
-                        },
+                        .Knight = .{ .move_index = 0 },
                     },
                 };
             }
         };
 
-        pub fn init(piece: *Piece, square: Square, pieces: *[8][8]?Piece) MoveIterator {
+        pub fn init(piece: *Piece, square: Square, board: *Board) MoveIterator {
             return MoveIterator{
                 .piece = piece,
                 .square = square,
-                .pieces = pieces,
+                .board = board,
                 .type_ = MoveContext.init(piece.type_),
             };
         }
@@ -404,7 +450,135 @@ const Piece = struct {
         pub fn next(it: *MoveIterator) ?Square {
             while (true) {
                 const context = it.context orelse return null;
+
+                const next_move = switch (context) {
+                    .Queen, .Rook, .Bishop => |vector| it.next_move_in_vector(vector),
+                    .King => |direction| it.next_move_for_king(direction),
+                    .Knight => |data| it.next_move_for_knight(&data.move_index),
+                    .Pawn => |move| it.next_move_for_pawn(move),
+                };
+
+                if (next_move.out_of_moves) it.context = null;
+                if (next_move.move) |move| return move;
             }
+        }
+
+        fn next_move_in_vector(it: *MoveIterator, vector: *AttackVector) NextMove {
+            var next_move = NextMove.initial();
+            const go_to_next_direction = false;
+
+            const square = it.square.in_direction(vector.direction, vector.distance);
+            if (square) |sq| {
+                if (board.get_piece(sq)) |piece| {
+                    vector.distance = 1;
+                    go_to_next_direction = true;
+
+                    if (piece.color != it.piece.color) next_move.move = sq;
+                } else {
+                    if (vector.distance < 7) {
+                        vector.distance += 1;
+                    } else {
+                        vector.distance = 1;
+                        go_to_next_direction = true;
+                    }
+
+                    next_move.move = sq;
+                }
+            } else {
+                vector.distance = 1;
+                go_to_next_direction = true;
+            }
+
+            if (go_to_next_direction) {
+                if (vector.direction.next_for_piece_type(it.piece.type_)) |d| {
+                    vector.direction = d;
+                } else {
+                    out_of_moves = true;
+                }
+            }
+
+            return next_move;
+        }
+
+        fn next_move_for_king(it: *MoveIterator, direction: *AttackDirection) NextMove {
+            var next_move = NextMove.initial();
+            const vector = AttackVector{ .direction = direction, .distance = 1 };
+
+            if (it.square.in_direction(vector)) |sq| {
+                if (it.board.get_piece(sq)) |piece| {
+                    if (piece.color != it.piece.color) {
+                        next_move.move = sq;
+                    }
+                } else {
+                    next_move.move = sq;
+                }
+            }
+
+            if (direction.next_for_piece_type(context.piece.type_)) |d| {
+                direction.* = d;
+            } else {
+                next_move.out_of_moves = true;
+            }
+
+            return next_move;
+        }
+
+        fn next_move_for_knight(it: *MoveIterator, move_index: *u3) NextMove {
+            const knight_moves = [8]MoveVector{
+                MoveVector{ .file = 2, .rank = 1 },
+                MoveVector{ .file = 1, .rank = 2 },
+                MoveVector{ .file = -1, .rank = 2 },
+                MoveVector{ .file = -2, .rank = 1 },
+                MoveVector{ .file = -2, .rank = -1 },
+                MoveVector{ .file = -1, .rank = -2 },
+                MoveVector{ .file = 1, .rank = -2 },
+                MoveVector{ .file = 2, .rank = -1 },
+            };
+
+            var next_move = NextMove.initial();
+            var square = it.square.add_vector(knight_moves[move_index.*]);
+
+            if (move_index.* == math.intMax(u3)) {
+                next_move.out_of_moves = true;
+            } else {
+                move_index.* += 1;
+            }
+
+            if (square) |sq| {
+                if (it.board.get_piece(sq)) |piece| {
+                    if (piece.color != it.piece.color) {
+                        next_move.move = sq;
+                    }
+                } else {
+                    next_move.move = sq;
+                }
+            }
+
+            return next_move;
+        }
+
+        fn next_move_for_pawn(it: *MoveIterator, move: *PawnMove) NextMove {
+            var next_move = NextMove.initial();
+            const vector = move.vector(it.piece.color);
+            const square = it.square.add_vector(vector);
+
+            if (move_index.* == math.intMax(u3)) {
+                next_move.out_of_moves = true;
+            } else {
+                move_index.* += 1;
+            }
+
+            if (square) |sq| {
+                if (it.board.get_piece(sq)) |piece| {
+                    if (piece.color != it.piece.color) {
+                        next_move.move = sq;
+                    }
+                } else {
+                    next_move.move = sq;
+                }
+            }
+
+            return next_move;
         }
     };
 };
@@ -455,6 +629,30 @@ const Board = struct {
     }
 
     pub fn castle(board: *Board, side: CastleSide) !void {
+        if (board.move.color == Color.White) {
+            if (board.white_castling.has_castled)
+                return IllegalMoveError.AlreadyCastled;
+
+            if (!board.white_castling.able_to_castle())
+                return IllegalMoveError.NoLongerAbleToCastle;
+        } else {
+            if (board.black_castling.has_castled)
+                return IllegalMoveError.AlreadyCastled;
+
+            if (!board.black_castling.able_to_castle())
+                return IllegalMoveError.NoLongerAbleToCastle;
+        }
+
+        const move_through_squares: []const Square;
+        const king_castle_squares: []const Square;
+
+        // TODO
+        // if (board.move.color == Color.White) {
+        //     if (side == CastleSide.QueenSide) {
+        //         move_through_squares =
+        //     }
+        // }
+
         if (board.move.color == Color.White) {
             if (!board.white_can_castle)
                 return IllegalMoveError.NoLongerAbleToCastle;
@@ -805,15 +1003,15 @@ const CastleData = struct {
         };
     }
 
-    pub fn castle(data: *CastleData, side: CastleSide) void {
-        data.king_has_moved = true;
-        data.has_castled = true;
+    // pub fn castle(data: *CastleData, side: CastleSide) void {
+    //     data.king_has_moved = true;
+    //     data.has_castled = true;
 
-        switch (side) {
-            .KingSide => data.kingside_rook_has_moved = true,
-            .QueenSide => data.queenside_rook_has_moved = true,
-        }
-    }
+    //     switch (side) {
+    //         .KingSide => data.kingside_rook_has_moved = true,
+    //         .QueenSide => data.queenside_rook_has_moved = true,
+    //     }
+    // }
 
     pub fn able_to_castle(data: *CastleData, side: CastleSide) bool {
         const rook_has_moved = if (side == CastleSide.KingSide)
@@ -859,3 +1057,13 @@ const initial_board = [8][8]?Piece{
     black_pawns,
     black_pieces,
 };
+
+fn fallibleAdd(comptime Int: type, a: u3, b: Int) ?u3 {
+    const sum = @as(Int, a) + b;
+
+    if (sum >= 0 and sum <= math.maxInt(u3)) {
+        return @as(u3, sum);
+    } else {
+        return null;
+    }
+}
