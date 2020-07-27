@@ -36,11 +36,30 @@ pub fn main() anyerror!void {
     std.debug.print("{}", .{board});
 }
 
-const InternalError = error{ UnableToFindKing, MissingPiece };
+const InternalError = error{
+    UnableToFindKing,
+    MissingPiece,
+};
 
-const ParseError = error{ NonSequentialMoves, MissingMoveForBlack, InvalidDataProvided };
+const ParseError = error{
+    NonSequentialMoves,
+    MissingMoveForBlack,
+    InvalidDataProvided,
+};
 
-const IllegalMoveError = error{ CastleBlocked, NoLongerAbleToCastle, AlreadyCastled };
+const IllegalMoveError = error{
+    CannotPutKingInCheck,
+    CastleBlocked,
+    NoLongerAbleToCastle,
+    AlreadyCastled,
+    CantFindPieceThatMadeMove,
+    MultiplePiecesCouldHaveMadeMove,
+    CannotCastleThroughCheck,
+};
+
+pub fn readMoveList(move_list: ?[]const u8, allocator: var) !ArrayList(u8) {
+    // TODO: read moves from variable or stdin
+}
 
 const CastleSide = enum(u1) {
     KingSide,
@@ -50,6 +69,13 @@ const CastleSide = enum(u1) {
 const Color = enum(u1) {
     Black,
     White,
+
+    pub fn opposite(color: Color) Color {
+        return switch (color) {
+            Black => White,
+            White => Black,
+        };
+    }
 };
 
 const Diagonal = enum(u1) {
@@ -609,13 +635,15 @@ const Board = struct {
     move: CurrentMove,
     white_castling: CastleData,
     black_castling: CastleData,
+    en_passant_candidate: ?Square,
 
     pub fn initial() !Board {
         return Board{
             .pieces = initial_board,
             .move = CurrentMove.initial(),
-            .white_can_castle = true,
-            .black_can_castle = true,
+            .white_castling = CastleData.initial(),
+            .black_castling = CastleData.initial(),
+            .en_passant_candidate = null,
         };
     }
 
@@ -624,6 +652,9 @@ const Board = struct {
             .Standard => |m| try board.standard_move(m),
             .Castle => |c| try board.castle(c),
         }
+
+        if (try board.king_in_check(board.move.color))
+            return IllegalMoveError.CannotPutKingInCheck;
 
         board.current_move.increment();
     }
@@ -643,91 +674,106 @@ const Board = struct {
                 return IllegalMoveError.NoLongerAbleToCastle;
         }
 
-        const move_through_squares: []const Square;
-        const king_castle_squares: []const Square;
+        const squares = CastleData.important_squares(board.move.color, side);
 
-        // TODO
-        // if (board.move.color == Color.White) {
-        //     if (side == CastleSide.QueenSide) {
-        //         move_through_squares =
-        //     }
-        // }
+        if (board.any_pieces_on_squares(squares.must_be_empty))
+            return IllegalMoveError.CastleBlocked;
+
+        for (squares.king_moves_through) |sq| {
+            if (board.color_can_attack_square(color, sq))
+                return IllegalMoveError.CannotPutKingInCheck;
+        }
+
+        board.set_piece(squares.king_origin, null);
+        board.set_piece(squares.king_destination, Piece.init(PieceType.King, board.move.color));
+
+        board.set_piece(squares.rook_origin, null);
+        board.set_piece(squares.rook_destination, Piece.init(PieceType.Rook, board.move.color));
 
         if (board.move.color == Color.White) {
-            if (!board.white_can_castle)
-                return IllegalMoveError.NoLongerAbleToCastle;
-
-            const white_king = try board.get_king(Color.White);
-            if (c == CastleSide.KingSide) {
-                const blocking_squares = [_]Square{
-                    Square.init(5, 0), Square.init(6, 0),
-                };
-                if (board.any_pieces_on_squares(&blocking_squares))
-                    return IllegalMoveError.CastleBlocked;
-
-                const rook = board.get_piece(Square.init(7, 0)) orelse
-                    return InternalError.MissingPiece;
-
-                // TODO: check for checks preventing castling
-
-                rook.location = Square.init(5, 0);
-                white_king.location = Square.init(6, 0);
-            }
+            board.white_castling.set_castled();
         } else {
-            if (!board.black_can_castle)
-                return IllegalMoveError.NoLongerAbleToCastle;
-
-            const black_king = try board.get_king_position(Color.Black);
+            board.black_castling.set_castled();
         }
     }
 
     pub fn standard_move(board: *Board, move: StandardMove) !void {
-        // z
+        const piece_on_square = try board.find_piece_that_made_move(move);
+        board.set_piece(move.destination, piece_on_square.piece);
+        board.set_piece(piece_on_square.square, null);
+
+        // TODO: check for en passant, etc.
     }
 
-    pub fn find_piece_that_made_move(board: *Board, move: *StandardMove) IllegalMoveError!*Piece {
-        var piece_iter = board.pieces(move.type_, board.current_move.color);
+    pub fn piece_can_make_move(board: *Board, piece: Piece, from: Square, to: Square) bool {
+        const moves = piece.possible_moves(from, board);
 
-        switch (move.piece_type) {
-            .Queen => {},
-        }
-    }
-
-    pub fn in_checkmate(board: *Board) InternalError!?*Piece {
-        // TODO: finish this function
-        const white_king = try board.get_king(Color.White);
-        const black_king = try board.get_king(Color.Black);
-
-        return null;
-    }
-
-    pub fn get_king(board: *Board, color: Color) InternalError!*Piece {
-        var king_pieces = board.pieces(PieceType.King, color);
-        while (king_pieces.next()) |king| return king;
-
-        return InternalError.UnableToFindKing;
-    }
-
-    pub fn get_piece(board: *Board, square: Square) ?*Piece {
-        return &(board.pieces[square.rank][square.file] orelse return null);
-    }
-
-    pub fn get_piece_const(board: *const Board, square: Square) ?*const Piece {
-        return &(board.pieces[square.rank][square.file] orelse return null);
-    }
-
-    pub fn any_pieces_on_squares(board: *Board, squares: []const Square) bool {
-        for (squares) |square| {
-            if (board.get_piece(square) != null) {
-                return true;
-            }
+        while (moves.next()) |move| {
+            if (eql(Square, move, to)) return true;
         }
 
         return false;
     }
 
-    pub fn pieces(board: *Board, type_: ?PieceType, color: ?Color) Iterator {
-        return Iterator.init(board, type_, color);
+    pub fn find_piece_that_made_move(board: *Board, move: *StandardMove) IllegalMoveError!PieceOnSquare {
+        var piece_iter = board.pieces(move.type_, .{
+            .color = board.current_move.color,
+            .rank = move.source_rank,
+            .file = move.source_file,
+        });
+
+        const piece = while (piece_iter.next()) |pair| {
+            if (board.piece_can_make_move(pair.piece, pair.square, move.destination))
+                break pair;
+        } else return IllegalMoveError.CantFindPieceThatMadeMove;
+
+        while (piece_iter.next()) |pair| {
+            if (board.piece_can_make_move(pair.piece, pair.square, move.destination))
+                return IllegalMoveError.MultiplePiecesCouldHaveMadeMove;
+        }
+
+        return piece;
+    }
+
+    pub fn color_can_attack_square(board: *Board, color: Color, square: Square) bool {
+        var pieces = board.pieces(.{ .color = color });
+
+        while (pieces.next()) |pair| {
+            if (board.piece_can_make_move(pair.piece, pair.square, square))
+                return true;
+        }
+
+        return false;
+    }
+
+    pub fn king_state(board: *Board, color: Color) InternalError!KingState {
+        var king_pieces = board.pieces(.{ .color = color, .type_ = PieceType.King });
+        const king = pieces.next() orelse return InternalError.UnableToFindKing;
+
+        const attackers = board.pieces(.{ .color = color.opposite() });
+
+        while (attackers.next()) |pair| {
+            if (board.piece_can_make_move(pair.piece, pair.square, king.square)) {
+                return KingCheckState.InCheck;
+            }
+            // TODO: figure out how to check for checkmate
+        }
+
+        return KingCheckState.NotInCheck;
+    }
+
+    pub fn get_piece(board: Board, square: Square) ?Piece {
+        return board.pieces[square.rank][square.file];
+    }
+
+    pub fn set_piece(board: *Board, square: Square, piece: ?Piece) void {
+        board.pieces[square.rank][square.file] = piece;
+    }
+
+    pub fn any_pieces_on_squares(board: *Board, squares: []const Square) bool {
+        return for (squares) |square| {
+            if (board.get_piece(square) != null) break true;
+        } else false;
     }
 
     pub fn format(board: *const Board, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: var) !void {
@@ -771,18 +817,27 @@ const Board = struct {
         });
     }
 
+    pub fn pieces(board: *Board, filter: Iterator.Filter) Iterator {
+        return Iterator.init(board, filter);
+    }
+
     const Iterator = struct {
         board: *Board,
         square: ?Square,
-        type_: ?PieceType,
-        color: ?Color,
+        filter: Filter,
 
-        pub fn init(board: *Board, type_: ?PieceType, color: ?Color) Iterator {
+        const Filter = struct {
+            type_: ?PieceType = null,
+            color: ?Color = null,
+            rank: ?u3 = null,
+            file: ?u3 = null,
+        };
+
+        pub fn init(board: *Board, filter: Filter) Iterator {
             return Iterator{
                 .board = board,
                 .square = Square.init(0, 0),
-                .type_ = type_,
-                .color = color,
+                .filter = filter,
             };
         }
 
@@ -804,32 +859,52 @@ const Board = struct {
             }
         }
 
-        pub fn next(it: *Iterator) ?*Piece {
+        pub fn next(it: *Iterator) ?PieceOnSquare {
             while (true) {
                 const square = it.square orelse return null;
                 defer it.increment_square(square);
 
+                if (it.filter.rank) |rank| {
+                    if (rank != square.rank) continue;
+                }
+
+                if (it.filter.file) |file| {
+                    if (file != square.file) continue;
+                }
+
                 if (board.get_piece(square)) |piece| {
-                    if (it.type_) |type_| {
+                    if (it.filter.type_) |type_| {
                         if (type_ != piece.type_) continue;
                     }
 
-                    if (it.color) |color| {
+                    if (it.filter.color) |color| {
                         if (color != piece.color) continue;
                     }
 
-                    return piece;
+                    return .{ .piece = piece, .square = square };
                 }
             }
         }
-
-        pub fn collect(it: *Iterator, allocator: var) !std.ArrayList(*Piece) {
-            var piece_list = std.ArrayList(*Piece).init(allocator);
-            while (it.next()) |piece| try p.append(piece);
-
-            return piece_list;
-        }
     };
+};
+
+const KingState = enum(u2) {
+    NotInCheck,
+    InCheck,
+    InCheckmate,
+
+    pub fn in_check(state: KingState) bool {
+        return state == InCheck;
+    }
+
+    pub fn checkmated(state: KingState) bool {
+        return state == InCheckmate;
+    }
+};
+
+const PieceOnSquare = struct {
+    piece: Piece,
+    square: Square,
 };
 
 const Move = union(enum) {
@@ -1003,15 +1078,15 @@ const CastleData = struct {
         };
     }
 
-    // pub fn castle(data: *CastleData, side: CastleSide) void {
-    //     data.king_has_moved = true;
-    //     data.has_castled = true;
+    pub fn set_castled(data: *CastleData, side: CastleSide) void {
+        data.king_has_moved = true;
+        data.has_castled = true;
 
-    //     switch (side) {
-    //         .KingSide => data.kingside_rook_has_moved = true,
-    //         .QueenSide => data.queenside_rook_has_moved = true,
-    //     }
-    // }
+        switch (side) {
+            .KingSide => data.kingside_rook_has_moved = true,
+            .QueenSide => data.queenside_rook_has_moved = true,
+        }
+    }
 
     pub fn able_to_castle(data: *CastleData, side: CastleSide) bool {
         const rook_has_moved = if (side == CastleSide.KingSide)
@@ -1021,6 +1096,89 @@ const CastleData = struct {
 
         return !data.king_has_moved and !rook_has_moved;
     }
+
+    pub fn important_squares(color: Color, side: CastleSide) Squares {
+        if (board.move.color == Color.White) {
+            if (side == CastleSide.KingSide) {
+                return Squares{
+                    .must_be_empty = [_]Square{
+                        Square.init(5, 0),
+                        Square.init(6, 0),
+                    },
+                    .king_moves_through = [_]Square{
+                        Square.init(4, 0),
+                        Square.init(5, 0),
+                        Square.init(6, 0),
+                    },
+                    .king_origin = Square.init(4, 0),
+                    .king_destination = Square.init(6, 0),
+                    .rook_origin = Square.init(7, 0),
+                    .rook_destination = Square.init(5, 0),
+                };
+            } else {
+                return Squares{
+                    .must_be_empty = [_]Square{
+                        Square.init(1, 0),
+                        Square.init(2, 0),
+                        Square.init(3, 0),
+                    },
+                    .king_moves_through = [_]Square{
+                        Square.init(4, 0),
+                        Square.init(3, 0),
+                        Square.init(2, 0),
+                    },
+                    .king_origin = Square.init(4, 0),
+                    .king_destination = Square.init(2, 0),
+                    .rook_origin = Square.init(0, 0),
+                    .rook_destination = Square.init(3, 0),
+                };
+            }
+        } else {
+            if (side == CastleSide.KingSide) {
+                return Squares{
+                    .must_be_empty = [_]Square{
+                        Square.init(5, 7),
+                        Square.init(6, 7),
+                    },
+                    .king_moves_through = [_]Square{
+                        Square.init(4, 7),
+                        Square.init(5, 7),
+                        Square.init(6, 7),
+                    },
+                    .king_origin = Square.init(4, 7),
+                    .king_destination = Square.init(6, 7),
+                    .rook_origin = Square.init(7, 7),
+                    .rook_destination = Square.init(5, 7),
+                };
+            } else {
+                return Squares{
+                    .must_be_empty = [_]Square{
+                        Square.init(1, 7),
+                        Square.init(2, 7),
+                        Square.init(3, 7),
+                    },
+                    .king_moves_through = [_]Square{
+                        Square.init(4, 7),
+                        Square.init(3, 7),
+                        Square.init(2, 7),
+                    },
+                    .king_origin = Square.init(4, 7),
+                    .king_destination = Square.init(2, 7),
+                    .rook_origin = Square.init(0, 7),
+                    .rook_destination = Square.init(3, 7),
+                };
+            }
+        }
+    }
+
+    const Squares = struct {
+        must_be_empty: []const Square,
+        king_moves_through: []const Square,
+        king_origin: Square,
+        king_destination: Square,
+        rook_origin: Square,
+        rook_destination: Square,
+    };
 };
 
 const white_pawns = [1]?Piece{Piece.init(PieceType.Pawn, Color.White)} ** 8;
